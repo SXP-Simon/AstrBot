@@ -94,9 +94,25 @@ class TelegramPlatformAdapter(Platform):
 
         self.scheduler = AsyncIOScheduler()
         self._terminating = False
-        self._polling_restart_delay = float(
-            self.config.get("telegram_polling_restart_delay", 5.0)
-        )
+        raw_delay = self.config.get("telegram_polling_restart_delay", 5.0)
+        try:
+            delay = float(raw_delay)
+        except (TypeError, ValueError):
+            logger.warning(
+                "Invalid 'telegram_polling_restart_delay' value %r in config, "
+                "falling back to default 5.0s",
+                raw_delay,
+            )
+            delay = 5.0
+
+        if delay < 0.1:
+            logger.warning(
+                "Configured 'telegram_polling_restart_delay' (%s) is too small; "
+                "enforcing minimum of 0.1s to avoid tight restart loops",
+                delay,
+            )
+            delay = 0.1
+        self._polling_restart_delay = delay
 
         # Media group handling
         # Cache structure: {media_group_id: {"created_at": datetime, "items": [(update, context), ...]}}
@@ -151,11 +167,17 @@ class TelegramPlatformAdapter(Platform):
 
         while not self._terminating:
             try:
-                queue = self.application.updater.start_polling(
+                await self.application.updater.start_polling(
                     error_callback=self._on_polling_error
                 )
                 logger.info("Telegram Platform Adapter is running.")
-                await queue
+                polling_check_event = asyncio.Event()
+                while self.application.updater.running and not self._terminating:
+                    try:
+                        await asyncio.wait_for(polling_check_event.wait(), timeout=1)
+                    except TimeoutError:
+                        continue
+
                 if not self._terminating:
                     logger.warning(
                         "Telegram polling loop exited unexpectedly, "
@@ -164,10 +186,10 @@ class TelegramPlatformAdapter(Platform):
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                logger.error(
+                logger.exception(
                     "Telegram polling crashed with exception: "
                     f"{type(e).__name__}: {e!s}. "
-                    f"Retrying in {self._polling_restart_delay}s."
+                    f"Retrying in {self._polling_restart_delay}s.",
                 )
 
             if not self._terminating:
@@ -175,7 +197,8 @@ class TelegramPlatformAdapter(Platform):
 
     def _on_polling_error(self, error: Exception) -> None:
         logger.error(
-            f"Telegram polling request failed: {type(error).__name__}: {error!s}"
+            f"Telegram polling request failed: {type(error).__name__}: {error!s}",
+            exc_info=(type(error), error, error.__traceback__),
         )
 
     async def register_commands(self) -> None:
