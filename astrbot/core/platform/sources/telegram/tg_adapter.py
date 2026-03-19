@@ -93,6 +93,10 @@ class TelegramPlatformAdapter(Platform):
         logger.debug(f"Telegram base url: {self.client.base_url}")
 
         self.scheduler = AsyncIOScheduler()
+        self._terminating = False
+        self._polling_restart_delay = float(
+            self.config.get("telegram_polling_restart_delay", 5.0)
+        )
 
         # Media group handling
         # Cache structure: {media_group_id: {"created_at": datetime, "items": [(update, context), ...]}}
@@ -145,9 +149,34 @@ class TelegramPlatformAdapter(Platform):
             logger.error("Telegram Updater is not initialized. Cannot start polling.")
             return
 
-        queue = self.application.updater.start_polling()
-        logger.info("Telegram Platform Adapter is running.")
-        await queue
+        while not self._terminating:
+            try:
+                queue = self.application.updater.start_polling(
+                    error_callback=self._on_polling_error
+                )
+                logger.info("Telegram Platform Adapter is running.")
+                await queue
+                if not self._terminating:
+                    logger.warning(
+                        "Telegram polling loop exited unexpectedly, "
+                        f"retrying in {self._polling_restart_delay}s."
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.error(
+                    "Telegram polling crashed with exception: "
+                    f"{type(e).__name__}: {e!s}. "
+                    f"Retrying in {self._polling_restart_delay}s."
+                )
+
+            if not self._terminating:
+                await asyncio.sleep(self._polling_restart_delay)
+
+    def _on_polling_error(self, error: Exception) -> None:
+        logger.error(
+            f"Telegram polling request failed: {type(error).__name__}: {error!s}"
+        )
 
     async def register_commands(self) -> None:
         """收集所有注册的指令并注册到 Telegram"""
@@ -567,6 +596,7 @@ class TelegramPlatformAdapter(Platform):
 
     async def terminate(self) -> None:
         try:
+            self._terminating = True
             if self.scheduler.running:
                 self.scheduler.shutdown()
 
