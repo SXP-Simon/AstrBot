@@ -290,7 +290,32 @@ class StarTools:
             if not module:
                 raise RuntimeError("无法获取调用者模块信息")
 
-            metadata = star_map.get(module.__name__, None)
+            curr_module_name = module.__name__
+            metadata = None
+            temp_name = curr_module_name
+            while temp_name:
+                # 1. 尝试精确匹配
+                metadata = star_map.get(temp_name)
+                if metadata:
+                    break
+
+                # 2. 尝试前缀匹配（处理主模块为同级或子级的情况，如 data.plugins.plugin.main）
+                # 排除顶级公共包，避免因前溯过退到根目录导致错误匹配到其他插件
+                if temp_name not in [
+                    "data.plugins",
+                    "astrbot.builtin_stars",
+                    "astrbot",
+                ]:
+                    for key in star_map:
+                        if key.startswith(temp_name + "."):
+                            metadata = star_map[key]
+                            break
+                if metadata:
+                    break
+
+                if "." not in temp_name:
+                    break
+                temp_name = ".".join(temp_name.split(".")[:-1])
 
             if not metadata:
                 raise RuntimeError(f"无法获取模块 {module.__name__} 的元数据信息")
